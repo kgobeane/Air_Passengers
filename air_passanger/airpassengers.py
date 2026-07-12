@@ -10,25 +10,58 @@ from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from sklearn.metrics import mean_squared_error, mean_absolute_percentage_error
 import numpy as np
 
-# ----------------------------------------------------------------------
-# Data loading
-# ----------------------------------------------------------------------
+st.title("✈️ Air Passenger Forecasting Dashboard")
 
-@st.cache_data
-def load_data():
-    base_path = os.path.dirname(__file__)
-    file_path = os.path.join(base_path, "air_passengers.csv")
-    df = pd.read_csv(file_path)
+# ----------------------------------------------------------------------
+# File uploader (with fallback to bundled dataset)
+# ----------------------------------------------------------------------
+uploaded_file = st.file_uploader("Upload your CSV file", type="csv")
+
+if uploaded_file:
+    df = pd.read_csv(uploaded_file)
+
+    # ✅ Validation step
+    required_cols = {"Month", "#Passengers"}
+    if not required_cols.issubset(df.columns):
+        st.error("CSV must contain 'Month' and '#Passengers' columns.")
+        st.stop()  # Stop execution if file is invalid
+
     df['Month'] = pd.to_datetime(df['Month'])
     df.set_index('Month', inplace=True)
     df = df.asfreq('MS')
-    return df
+else:
+    # Fallback to bundled dataset using os.path
+    base_path = os.path.dirname(__file__)
+    file_path = os.path.join(base_path, "air_passengers.csv")
+    df = pd.read_csv(file_path)
 
-df = load_data()
+    df['Month'] = pd.to_datetime(df['Month'])
+    df.set_index('Month', inplace=True)
+    df = df.asfreq('MS')
 
-st.title("✈️ Air Passenger Forecasting Dashboard")
 
+# ----------------------------------------------------------------------
+# Cached model fitting helpers
+# ----------------------------------------------------------------------
+@st.cache_resource
+def fit_sarima(series):
+    model = SARIMAX(
+        series,
+        order=(1, 1, 1),
+        seasonal_order=(1, 1, 1, 12),
+        enforce_stationarity=False,
+        enforce_invertibility=False,
+    )
+    return model.fit(disp=False)
+
+@st.cache_resource
+def fit_hw(series, trend, seasonal):
+    model = ExponentialSmoothing(series, trend=trend, seasonal=seasonal, seasonal_periods=12)
+    return model.fit()
+
+# ----------------------------------------------------------------------
 # Tabs
+# ----------------------------------------------------------------------
 tab1, tab2, tab3 = st.tabs(["EDA", "Model Comparison", "Forecast Visualization"])
 
 # ----------------------------------------------------------------------
@@ -60,31 +93,7 @@ with tab1:
     st.pyplot(fig)
 
 # ----------------------------------------------------------------------
-# Cached model fitting helpers
-# Streamlit reruns the whole script on every widget interaction, so
-# without caching these would silently refit on every slider move.
-# ----------------------------------------------------------------------
-
-@st.cache_resource
-def fit_sarima(train_series):
-    model = SARIMAX(
-        train_series,
-        order=(1, 1, 1),
-        seasonal_order=(1, 1, 1, 12),
-        enforce_stationarity=False,
-        enforce_invertibility=False,
-    )
-    return model.fit(disp=False)
-
-
-@st.cache_resource
-def fit_hw(series, trend, seasonal):
-    model = ExponentialSmoothing(series, trend=trend, seasonal=seasonal, seasonal_periods=12)
-    return model.fit()
-
-
-# ----------------------------------------------------------------------
-# Tab 2: Model Comparison (evaluated on held-out last 12 months)
+# Tab 2: Model Comparison
 # ----------------------------------------------------------------------
 with tab2:
     st.header("SARIMA vs Holt-Winters")
@@ -121,20 +130,24 @@ with tab2:
     st.pyplot(fig)
 
 # ----------------------------------------------------------------------
-# Tab 3: Extended Forecast (refit on ALL data, forecasts into the future)
+# Tab 3: Forecast Visualization
 # ----------------------------------------------------------------------
 with tab3:
     st.header("Extended Forecast")
 
     horizon = st.slider("Forecast horizon (months)", 12, 60, 36)
 
-    # IMPORTANT: refit on the full series here, not the Tab 2 model.
-    # The Tab 2 model was trained on `train` (excludes the last 12 months),
-    # so forecasting from it would overlap with data we already have
-    # instead of projecting into genuinely unseen future months.
-    final_fit = fit_hw(df['#Passengers'], 'add', 'mul')
-    forecast = final_fit.forecast(horizon)
+    # Model toggle
+    model_choice = st.radio("Select forecasting model", ["Holt-Winters", "SARIMA"])
 
+    if model_choice == "Holt-Winters":
+        final_fit = fit_hw(df['#Passengers'], 'add', 'mul')
+        forecast = final_fit.forecast(horizon)
+    else:
+        final_fit = fit_sarima(df['#Passengers'])
+        forecast = final_fit.forecast(horizon)
+
+    # Confidence intervals (approximate)
     residuals = df['#Passengers'] - final_fit.fittedvalues
     std = np.std(residuals)
     upper = forecast + 1.96 * std
@@ -142,19 +155,26 @@ with tab3:
 
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(df.index, df['#Passengers'], label="Historical")
-    ax.plot(forecast.index, forecast, label="Forecast", color="red")
+    ax.plot(forecast.index, forecast, label=f"{model_choice} Forecast", color="red")
     ax.fill_between(forecast.index, lower, upper, color="pink", alpha=0.3, label="95% CI")
     ax.axvline(df.index[-1], color="gray", linestyle=":", label="Forecast start")
     ax.legend()
-    ax.set_title(f"Holt-Winters Forecast ({horizon} months ahead)")
+    ax.set_title(f"{model_choice} Forecast ({horizon} months ahead)")
     st.pyplot(fig)
 
     st.write("Forecasted values:")
     st.dataframe(forecast.rename("Forecasted Passengers"))
 
+    # Download button
+    csv = forecast.to_csv().encode('utf-8')
+    st.download_button(
+        label="Download forecast as CSV",
+        data=csv,
+        file_name="forecast.csv",
+        mime="text/csv",
+    )
+
     st.caption(
-        "Note: the 95% CI band is an approximation (±1.96 × residual std dev), "
-        "since Holt-Winters doesn't produce native confidence intervals the way "
-        "SARIMA does. Treat it as a rough uncertainty guide, especially further "
-        "out in the horizon."
+        "Note: the 95% CI band is an approximation (±1.96 × residual std dev). "
+        "Treat it as a rough uncertainty guide, especially further out in the horizon."
     )
