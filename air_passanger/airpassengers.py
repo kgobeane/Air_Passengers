@@ -15,10 +15,12 @@ import numpy as np
 
 @st.cache_data
 def load_data():
-    df = pd.read_csv("air_passengers.csv")
+    base_path = os.path.dirname(__file__)
+    file_path = os.path.join(base_path, "air_passengers.csv")
+    df = pd.read_csv(file_path)
     df['Month'] = pd.to_datetime(df['Month'])
     df.set_index('Month', inplace=True)
-    df = df.asfreq('MS')  # MS = month-start, matches the actual timestamps
+    df = df.asfreq('MS')
     return df
 
 df = load_data()
